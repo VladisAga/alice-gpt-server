@@ -8,7 +8,7 @@ const app = express();
 app.use(express.json());
 
 // Groq model (choose one)
-const MODEL_NAME = "llama3-8b-8192"; // или "llama3-70b-8192", "mixtral-8x7b-32768"
+const MODEL_NAME = "llama-3.1-8b-instant"; // или "llama3-70b-8192", "mixtral-8x7b-32768"
 
 // История диалогов
 const dialogHistory = new Map();
