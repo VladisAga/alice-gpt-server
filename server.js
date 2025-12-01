@@ -47,5 +47,5 @@ app.post('/alice', async (req, res) => {
 
 app.get("/", (req, res) => res.send("Alice → ChatGPT bridge работает"));
 
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT;
 app.listen(PORT, () => console.log("Server started on port:", PORT));
