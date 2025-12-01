@@ -7,19 +7,13 @@ dotenv.config();
 const app = express();
 app.use(express.json());
 
-// Используем Mistral API
-const MODEL_NAME = "open-mistral-7b"; // mistral-tiny, mistral-small, mistral-medium, mistral-large-latest
-
-const MODEL_PARAMS = {
-    max_tokens: 256,
-    temperature: 0.8,
-    top_p: 0.95,
-    random_seed: Math.floor(Math.random() * 10000)
-};
+// DeepSeek model
+const MODEL_NAME = "deepseek-chat"; // only one model for now — powerful & multilingual
 
 // История диалогов
 const dialogHistory = new Map();
 
+// Автоочистка сессий (30 минут неактивности)
 setInterval(() => {
     const now = Date.now();
     for (const [id, session] of dialogHistory.entries()) {
@@ -28,6 +22,17 @@ setInterval(() => {
         }
     }
 }, 10 * 60 * 1000);
+
+// Валидация ключа
+if (!process.env.DEEPSEEK_API_KEY) {
+    console.error("❌ DEEPSEEK_API_KEY не задан в .env!");
+    process.exit(1);
+}
+process.env.DEEPSEEK_API_KEY = process.env.DEEPSEEK_API_KEY.trim();
+if (process.env.DEEPSEEK_API_KEY.length < 10 || !process.env.DEEPSEEK_API_KEY.startsWith("sk-")) {
+    console.error("❌ Некорректный DEEPSEEK_API_KEY — должен начинаться с 'sk-'");
+    process.exit(1);
+}
 
 app.post("/alice", async (req, res) => {
     try {
@@ -56,7 +61,7 @@ app.post("/alice", async (req, res) => {
 
         // Приветствие при новой сессии и пустом вводе
         if (!text.trim()) {
-            const welcome = "Привет! Я подключён к Mistral AI. Чем могу помочь?";
+            const welcome = "Привет! Я DeepSeek — умный ИИ, созданный в Китае, но говорю по-русски как родной. Чем могу помочь?";
             data.history.push({ role: "assistant", content: welcome });
             return res.json({
                 response: { text: welcome, end_session: false },
@@ -64,41 +69,55 @@ app.post("/alice", async (req, res) => {
             });
         }
 
+        // Завершение по ключевым словам
+        const lowerText = text.toLowerCase();
+        if (lowerText.includes("пока") || lowerText.includes("хватит") || lowerText.includes("стоп")) {
+            return res.json({
+                response: { text: "Спасибо за разговор! До новых встреч.", end_session: true },
+                version: "1.0"
+            });
+        }
+
         // Добавляем реплику пользователя
         data.history.push({ role: "user", content: text });
 
-        // Формируем messages: системное сообщение + история (до 6 последних)
+        // Формируем messages: системное + история (до 6 сообщений)
         const messages = [
-            { role: "system", content: "Ты — дружелюбный и краткий ассистент для Алисы (Яндекс.Диалоги). Отвечай на русском языке. Избегай markdown и длинных списков." },
-            ...data.history.slice(-6) // ограничим историю, чтобы не превысить лимит токенов
+            {
+                role: "system",
+                content: "Ты — DeepSeek, дружелюбный и краткий ассистент для Алисы (Яндекс.Диалоги). Отвечай на русском языке. Избегай markdown, списков и длинных абзацев. Максимум 2–3 предложения."
+            },
+            ...data.history.slice(-6)
         ];
 
-        // Запрос к Mistral API
-        const mistralRes = await fetch("https://api.mistral.ai/v1/chat/completions", {
+        // 🔥 Запрос к DeepSeek API
+        const deepseekRes = await fetch("https://api.deepseek.com/chat/completions", {
             method: "POST",
             headers: {
-                "Authorization": `Bearer ${process.env.MISTRAL_API_KEY}`,
+                "Authorization": `Bearer ${process.env.DEEPSEEK_API_KEY}`,
                 "Content-Type": "application/json",
                 "Accept": "application/json"
             },
             body: JSON.stringify({
                 model: MODEL_NAME,
-                messages,
-                ...MODEL_PARAMS
+                messages: messages,
+                temperature: 0.7,
+                max_tokens: 512,
+                stream: false
             })
         });
 
-        if (!mistralRes.ok) {
-            const errText = await mistralRes.text();
-            console.error("Mistral API error:", mistralRes.status, errText);
-            throw new Error(`Mistral API ${mistralRes.status}: ${errText}`);
+        if (!deepseekRes.ok) {
+            const errText = await deepseekRes.text();
+            console.error("🔴 DeepSeek API error:", deepseekRes.status, errText);
+            throw new Error(`DeepSeek API ${deepseekRes.status}`);
         }
 
-        const json = await mistralRes.json();
+        const json = await deepseekRes.json();
         const reply = json?.choices?.[0]?.message?.content?.trim() || "";
 
         if (!reply) {
-            throw new Error("Пустой ответ от Mistral API");
+            throw new Error("Пустой ответ от DeepSeek API");
         }
 
         // Обрезка под лимит Алисы (1024 символа)
@@ -119,7 +138,7 @@ app.post("/alice", async (req, res) => {
         console.error("❌ Ошибка в /alice:", err.message);
         return res.json({
             response: {
-                text: "Похоже, временно не могу ответить. Попробуйте повторить через минуту.",
+                text: "Похоже, DeepSeek временно задумался... Повторите, пожалуйста.",
                 end_session: false
             },
             version: "1.0"
@@ -138,16 +157,10 @@ app.get("/health", (req, res) => {
     });
 });
 
-// Проверка переменных окружения
-if (!process.env.MISTRAL_API_KEY) {
-    console.error("❌ Отсутствует MISTRAL_API_KEY в .env!");
-    process.exit(1);
-}
-
 const PORT = process.env.PORT || 3000;
 
 app.listen(PORT, () => {
-    console.log(`🚀 Сервер запущен на http://localhost:${PORT}`);
+    console.log(`🚀 DeepSeek-сервер запущен на http://localhost:${PORT}`);
     console.log(`🧠 Модель: ${MODEL_NAME}`);
-    console.log(`🔑 Mistral API Key: ${process.env.MISTRAL_API_KEY.slice(0, 5)}...`);
+    console.log(`🔑 DeepSeek API Key: ${process.env.DEEPSEEK_API_KEY.slice(0, 5)}...`);
 });
