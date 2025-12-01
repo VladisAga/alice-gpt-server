@@ -82,7 +82,7 @@ app.post('/alice', async (req, res) => {
 
         // Отправляем запрос к Hugging Face API
         const hfResponse = await fetch(
-            `https://api-inference.huggingface.co/pipeline/text-generation/microsoft/DialoGPT-medium`,
+            `https://router.huggingface.co/text-generation/microsoft/DialoGPT-medium`,
             {
                 method: "POST",
                 headers: {
