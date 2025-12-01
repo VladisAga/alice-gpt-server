@@ -11,19 +11,18 @@ app.post('/alice', async (req, res) => {
     try {
         const userMessage = req.body?.request?.original_utterance || "";
 
-        const openaiResponse = await fetch("https://api.openai.com/v1/chat/completions", {
+        // Отправляем запрос на Hugging Face
+        const hfResponse = await fetch("https://api-inference.huggingface.co/models/gpt2", {
             method: "POST",
             headers: {
-                "Authorization": `Bearer ${process.env.OPENAI_API_KEY}`,
+                "Authorization": `Bearer ${process.env.HF_API_KEY}`, // твой токен HF
                 "Content-Type": "application/json"
             },
-            body: JSON.stringify({
-                model: "gpt-4.1-mini",
-                messages: [{ role: "user", content: userMessage }]
-            })
+            body: JSON.stringify({ inputs: userMessage })
         }).then(r => r.json());
 
-        const reply = openaiResponse?.choices?.[0]?.message?.content || "Не понял запрос.";
+        // HF возвращает массив с текстом в поле generated_text
+        const reply = hfResponse?.[0]?.generated_text || "Не понял запрос.";
 
         res.json({
             response: {
@@ -33,7 +32,7 @@ app.post('/alice', async (req, res) => {
             version: "1.0"
         });
 
-        console.log("OpenAI Key (first 5 chars):", process.env.OPENAI_API_KEY?.slice(0, 5));
+        console.log("HF Key (first 5 chars):", process.env.HF_API_KEY?.slice(0, 5));
 
     } catch (err) {
         console.error(err);
@@ -47,7 +46,7 @@ app.post('/alice', async (req, res) => {
     }
 });
 
-app.get("/", (req, res) => res.send("Alice → ChatGPT bridge работает"));
+app.get("/", (req, res) => res.send("Alice → Hugging Face bridge работает"));
 
 const PORT = process.env.PORT;
 app.listen(PORT, () => console.log("Server started on port:", PORT));
