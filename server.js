@@ -1,88 +1,73 @@
-import express from 'express';
-import fetch from 'node-fetch';
-import dotenv from 'dotenv';
+import express from "express";
+import fetch from "node-fetch";
+import dotenv from "dotenv";
 
 dotenv.config();
 
 const app = express();
 app.use(express.json());
 
-// Конфигурация модели
-const MODEL_CONFIG = {
-    model: "microsoft/DialoGPT-medium", // Лучше для диалогов
-    parameters: {
-        max_new_tokens: 100,
-        temperature: 0.9,
-        repetition_penalty: 1.2,
-        do_sample: true
-    }
+// Используем бесплатную модель
+const MODEL_NAME = "microsoft/DialoGPT-small";
+
+const MODEL_PARAMS = {
+    max_new_tokens: 120,
+    temperature: 0.8,
+    repetition_penalty: 1.2,
+    do_sample: true
 };
 
-// Хранилище истории диалогов (временное, для демо)
+// История диалогов
 const dialogHistory = new Map();
 
-// Очистка старых сессий каждые 10 минут
+// Автоочистка сессий
 setInterval(() => {
     const now = Date.now();
-    for (const [sessionId, data] of dialogHistory.entries()) {
-        if (now - data.lastActivity > 30 * 60 * 1000) { // 30 минут
-            dialogHistory.delete(sessionId);
+    for (const [id, session] of dialogHistory.entries()) {
+        if (now - session.lastActivity > 30 * 60 * 1000) {
+            dialogHistory.delete(id);
         }
     }
 }, 10 * 60 * 1000);
 
-app.post('/alice', async (req, res) => {
+app.post("/alice", async (req, res) => {
     try {
-        // Проверка структуры запроса от Алисы
-        if (!req.body || !req.body.session || !req.body.request) {
-            return res.status(400).json({
-                response: {
-                    text: "Некорректный запрос. Проверьте структуру данных.",
-                    end_session: false
-                },
+        if (!req.body?.session || !req.body?.request) {
+            return res.json({
+                response: { text: "Некорректный формат запроса.", end_session: false },
                 version: "1.0"
             });
         }
 
-        const { session, request, version } = req.body;
+        const { session, request } = req.body;
         const sessionId = session.session_id;
-        const userMessage = request.original_utterance || "";
-        const isNewSession = request.type === "SimpleUtterance" && session.new;
+        const text = request.original_utterance || "";
+        const isNew = session.new;
 
-        // Инициализируем или получаем историю диалога
-        if (isNewSession || !dialogHistory.has(sessionId)) {
-            dialogHistory.set(sessionId, {
-                history: [],
-                lastActivity: Date.now()
-            });
+        // Создание сессии
+        if (isNew || !dialogHistory.has(sessionId)) {
+            dialogHistory.set(sessionId, { history: [], lastActivity: Date.now() });
         }
 
-        const sessionData = dialogHistory.get(sessionId);
-        sessionData.lastActivity = Date.now();
+        const data = dialogHistory.get(sessionId);
+        data.lastActivity = Date.now();
 
-        // Добавляем пользовательское сообщение в историю
-        sessionData.history.push(`Пользователь: ${userMessage}`);
-
-        // Формируем контекст (последние 4 сообщения)
-        const context = sessionData.history.slice(-4).join("\n");
-
-        // Если сообщение пустое (например, запуск навыка)
-        if (!userMessage.trim()) {
-            const welcomeMessage = "Привет! Я ваш умный помощник, подключенный к ИИ. Чем могу помочь?";
-            sessionData.history.push(`Ассистент: ${welcomeMessage}`);
+        if (!text.trim()) {
+            const welcome = "Привет! Я подключён к искусственному интеллекту. Что хотите узнать?";
+            data.history.push("Ассистент: " + welcome);
 
             return res.json({
-                response: {
-                    text: welcomeMessage,
-                    end_session: false
-                },
+                response: { text: welcome, end_session: false },
                 version: "1.0"
             });
         }
 
-        // Отправляем запрос к Hugging Face API
-        const hfResponse = await fetch(
-            `https://router.huggingface.co/text-generation/microsoft/DialoGPT-medium`,
+        data.history.push("Пользователь: " + text);
+        const context = data.history.slice(-4).join("\n");
+
+        // ---- HF API ----
+        const hf = await fetch(
+            `https://router.huggingface.co/text-generation/${MODEL_NAME}`,
             {
                 method: "POST",
                 headers: {
@@ -91,77 +76,46 @@ app.post('/alice', async (req, res) => {
                 },
                 body: JSON.stringify({
                     inputs: context,
-                    parameters: MODEL_CONFIG.parameters
+                    parameters: MODEL_PARAMS
                 })
             }
         );
 
-        // Проверка ответа от Hugging Face
-        if (!hfResponse.ok) {
-            console.error(`HF API Error: ${hfResponse.status}`, await hfResponse.text());
-            throw new Error(`API вернул ошибку: ${hfResponse.status}`);
+        if (!hf.ok) {
+            console.error("HF API error:", await hf.text());
+            throw new Error("HF API Error " + hf.status);
         }
 
-        const data = await hfResponse.json();
+        const json = await hf.json();
 
-        // Извлекаем сгенерированный текст
-        let reply = data?.[0]?.generated_text || "Не могу обработать ваш запрос.";
+        let answer = json?.[0]?.generated_text || "";
 
-        // Извлекаем только последний ответ ассистента
-        const lines = reply.split('\n');
-        const lastAssistantLine = lines.reverse().find(line =>
-            line.startsWith('Ассистент:') || !line.startsWith('Пользователь:')
-        );
+        // Ищем последнюю строку ассистента
+        const lines = answer.split("\n");
+        let reply = lines.reverse().find(l => l.startsWith("Ассистент:"));
 
-        if (lastAssistantLine) {
-            reply = lastAssistantLine.replace('Ассистент:', '').trim();
-        }
+        if (reply) reply = reply.replace("Ассистент:", "").trim();
+        else reply = answer.trim();
 
-        // Очистка ответа от лишних символов
-        reply = reply.replace(/<\|endoftext\|>|\n+/g, ' ').trim();
+        // Убираем мусор
+        reply = reply.replace(/<\|endoftext\|>/g, "").trim();
+        if (!reply) reply = "Я пока не знаю, что ответить. Попробуете иначе сформулировать?";
 
-        // Если ответ пустой, используем заглушку
-        if (!reply) {
-            reply = "Я подумал над вашим вопросом, но не нашел подходящего ответа. Можете переформулировать?";
-        }
+        // Обрезка для Алисы
+        if (reply.length > 1024) reply = reply.slice(0, 1020) + "...";
 
-        // Ограничение длины для Яндекс.Алисы (1024 символа)
-        if (reply.length > 1024) {
-            reply = reply.substring(0, 1020) + "...";
-        }
+        data.history.push("Ассистент: " + reply);
+        if (data.history.length > 10) data.history = data.history.slice(-10);
 
-        // Добавляем ответ в историю
-        sessionData.history.push(`Ассистент: ${reply}`);
-
-        // Ограничиваем историю 10 сообщениями
-        if (sessionData.history.length > 10) {
-            sessionData.history = sessionData.history.slice(-10);
-        }
-
-        // Отправляем ответ Алисе
-        res.json({
-            response: {
-                text: reply,
-                end_session: false
-            },
+        return res.json({
+            response: { text: reply, end_session: false },
             version: "1.0"
         });
-
-        console.log(`[${sessionId}] User: "${userMessage}" -> Assistant: "${reply.substring(0, 50)}..."`);
-
     } catch (err) {
-        console.error("Ошибка обработки запроса:", err);
-
-        // Формируем понятный пользователю ответ
-        let errorMessage = "Извините, произошла ошибка при обработке запроса.";
-
-        if (err.message.includes("API") || err.message.includes("ключ")) {
-            errorMessage = "Проблема с подключением к ИИ. Проверьте настройки API.";
-        }
-
-        res.json({
+        console.error("Ошибка:", err);
+        return res.json({
             response: {
-                text: errorMessage,
+                text: "Похоже, сервер ИИ временно недоступен.",
                 end_session: false
             },
             version: "1.0"
@@ -169,55 +123,26 @@ app.post('/alice', async (req, res) => {
     }
 });
 
-// Эндпоинт для проверки работы сервера
-app.get("/", (req, res) => {
-    res.json({
-        status: "running",
-        service: "Alice → Hugging Face Bridge",
-        models: "Диалоговые ИИ модели",
-        endpoints: {
-            alice: "POST /alice",
-            health: "GET /health"
-        }
-    });
-});
-
-// Эндпоинт для проверки здоровья
+// health-check
 app.get("/health", (req, res) => {
-    const health = {
-        status: "healthy",
-        timestamp: new Date().toISOString(),
-        uptime: process.uptime(),
-        memory: process.memoryUsage(),
-        activeSessions: dialogHistory.size
-    };
-    res.json(health);
-});
-
-// Эндпоинт для сброса сессий (только для отладки)
-app.post("/reset-sessions", (req, res) => {
-    const before = dialogHistory.size;
-    dialogHistory.clear();
     res.json({
-        message: "Сессии сброшены",
-        clearedSessions: before
+        status: "ok",
+        time: new Date().toISOString(),
+        memory: process.memoryUsage(),
+        sessions: dialogHistory.size
     });
 });
 
-// Проверка переменных окружения при старте
-const PORT = process.env.PORT || 3000;
-const HF_API_KEY = process.env.HF_API_KEY;
-
-if (!HF_API_KEY) {
-    console.error("❌ ОШИБКА: Не установлен HF_API_KEY в переменных окружения!");
-    console.error("Добавьте в .env файл: HF_API_KEY=ваш_токен_здесь");
+// Проверка переменных окружения
+if (!process.env.HF_API_KEY) {
+    console.error("❌ Нет переменной HF_API_KEY в .env!");
     process.exit(1);
 }
 
+const PORT = process.env.PORT || 3000;
+
 app.listen(PORT, () => {
-    console.log(`🚀 Сервер запущен на порту ${PORT}`);
-    console.log(`🔗 Локальная ссылка: http://localhost:${PORT}`);
-    console.log(`🧠 Используемая модель: ${MODEL_CONFIG.model}`);
-    console.log(`🔑 HF API Key: ${HF_API_KEY.slice(0, 5)}...`);
-    console.log("⏳ Очистка неактивных сессий каждые 10 минут");
+    console.log(`🚀 Сервер работает на http://localhost:${PORT}`);
+    console.log(`🧠 Модель: ${MODEL_NAME}`);
+    console.log(`🔑 Токен: ${process.env.HF_API_KEY.slice(0, 5)}...`);
 });
