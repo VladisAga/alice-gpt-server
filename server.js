@@ -33,6 +33,8 @@ app.post('/alice', async (req, res) => {
             version: "1.0"
         });
 
+        console.log("OpenAI Key (first 5 chars):", process.env.OPENAI_API_KEY?.slice(0, 5));
+
     } catch (err) {
         console.error(err);
         res.json({
