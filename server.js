@@ -7,13 +7,13 @@ dotenv.config();
 const app = express();
 app.use(express.json());
 
-// DeepSeek model
-const MODEL_NAME = "deepseek-chat"; // only one model for now — powerful & multilingual
+// Groq model (choose one)
+const MODEL_NAME = "llama3-8b-8192"; // или "llama3-70b-8192", "mixtral-8x7b-32768"
 
 // История диалогов
 const dialogHistory = new Map();
 
-// Автоочистка сессий (30 минут неактивности)
+// Автоочистка сессий
 setInterval(() => {
     const now = Date.now();
     for (const [id, session] of dialogHistory.entries()) {
@@ -24,13 +24,13 @@ setInterval(() => {
 }, 10 * 60 * 1000);
 
 // Валидация ключа
-if (!process.env.DEEPSEEK_API_KEY) {
-    console.error("❌ DEEPSEEK_API_KEY не задан в .env!");
+if (!process.env.GROQ_API_KEY) {
+    console.error("❌ GROQ_API_KEY не задан в .env!");
     process.exit(1);
 }
-process.env.DEEPSEEK_API_KEY = process.env.DEEPSEEK_API_KEY.trim();
-if (process.env.DEEPSEEK_API_KEY.length < 10 || !process.env.DEEPSEEK_API_KEY.startsWith("sk-")) {
-    console.error("❌ Некорректный DEEPSEEK_API_KEY — должен начинаться с 'sk-'");
+process.env.GROQ_API_KEY = process.env.GROQ_API_KEY.trim();
+if (!process.env.GROQ_API_KEY.startsWith("gsk_")) {
+    console.error("❌ Некорректный ключ: должен начинаться с 'gsk_'");
     process.exit(1);
 }
 
@@ -59,9 +59,9 @@ app.post("/alice", async (req, res) => {
         const data = dialogHistory.get(sessionId);
         data.lastActivity = Date.now();
 
-        // Приветствие при новой сессии и пустом вводе
+        // Приветствие при новой сессии
         if (!text.trim()) {
-            const welcome = "Привет! Я DeepSeek — умный ИИ, созданный в Китае, но говорю по-русски как родной. Чем могу помочь?";
+            const welcome = "Привет! Я LLaMA 3 — мощный ИИ от Meta, работаю через Groq. Чем могу помочь?";
             data.history.push({ role: "assistant", content: welcome });
             return res.json({
                 response: { text: welcome, end_session: false },
@@ -73,7 +73,7 @@ app.post("/alice", async (req, res) => {
         const lowerText = text.toLowerCase();
         if (lowerText.includes("пока") || lowerText.includes("хватит") || lowerText.includes("стоп")) {
             return res.json({
-                response: { text: "Спасибо за разговор! До новых встреч.", end_session: true },
+                response: { text: "Спасибо за разговор! До встречи.", end_session: true },
                 version: "1.0"
             });
         }
@@ -81,49 +81,48 @@ app.post("/alice", async (req, res) => {
         // Добавляем реплику пользователя
         data.history.push({ role: "user", content: text });
 
-        // Формируем messages: системное + история (до 6 сообщений)
+        // Формируем messages
         const messages = [
             {
                 role: "system",
-                content: "Ты — DeepSeek, дружелюбный и краткий ассистент для Алисы (Яндекс.Диалоги). Отвечай на русском языке. Избегай markdown, списков и длинных абзацев. Максимум 2–3 предложения."
+                content: "Ты — LLaMA 3, краткий и дружелюбный ассистент для Алисы. Отвечай на русском, 1–3 предложения, без markdown."
             },
             ...data.history.slice(-6)
         ];
 
-        // 🔥 Запрос к DeepSeek API
-        const deepseekRes = await fetch("https://api.deepseek.com/chat/completions", {
+        // 🔥 Запрос к Groq API (OpenAI-совместимый)
+        const groqRes = await fetch("https://api.groq.com/openai/v1/chat/completions", {
             method: "POST",
             headers: {
-                "Authorization": `Bearer ${process.env.DEEPSEEK_API_KEY}`,
-                "Content-Type": "application/json",
-                "Accept": "application/json"
+                "Authorization": `Bearer ${process.env.GROQ_API_KEY}`,
+                "Content-Type": "application/json"
             },
             body: JSON.stringify({
                 model: MODEL_NAME,
                 messages: messages,
                 temperature: 0.7,
                 max_tokens: 512,
-                stream: false
+                top_p: 0.95
             })
         });
 
-        if (!deepseekRes.ok) {
-            const errText = await deepseekRes.text();
-            console.error("🔴 DeepSeek API error:", deepseekRes.status, errText);
-            throw new Error(`DeepSeek API ${deepseekRes.status}`);
+        if (!groqRes.ok) {
+            const errText = await groqRes.text();
+            console.error("🔴 Groq API error:", groqRes.status, errText);
+            throw new Error(`Groq API ${groqRes.status}`);
         }
 
-        const json = await deepseekRes.json();
+        const json = await groqRes.json();
         const reply = json?.choices?.[0]?.message?.content?.trim() || "";
 
         if (!reply) {
-            throw new Error("Пустой ответ от DeepSeek API");
+            throw new Error("Пустой ответ от Groq");
         }
 
         // Обрезка под лимит Алисы (1024 символа)
         let finalReply = reply.length > 1024 ? reply.slice(0, 1020) + "…" : reply;
 
-        // Сохраняем ответ в историю
+        // Сохраняем в историю
         data.history.push({ role: "assistant", content: finalReply });
         if (data.history.length > 10) {
             data.history = data.history.slice(-10);
@@ -138,7 +137,7 @@ app.post("/alice", async (req, res) => {
         console.error("❌ Ошибка в /alice:", err.message);
         return res.json({
             response: {
-                text: "Похоже, DeepSeek временно задумался... Повторите, пожалуйста.",
+                text: "Groq временно недоступен. Попробуйте повторить через несколько секунд.",
                 end_session: false
             },
             version: "1.0"
@@ -160,7 +159,7 @@ app.get("/health", (req, res) => {
 const PORT = process.env.PORT || 3000;
 
 app.listen(PORT, () => {
-    console.log(`🚀 DeepSeek-сервер запущен на http://localhost:${PORT}`);
+    console.log(`🚀 Groq-сервер запущен на http://localhost:${PORT}`);
     console.log(`🧠 Модель: ${MODEL_NAME}`);
-    console.log(`🔑 DeepSeek API Key: ${process.env.DEEPSEEK_API_KEY.slice(0, 5)}...`);
+    console.log(`🔑 Groq API Key: ${process.env.GROQ_API_KEY.slice(0, 5)}...`);
 });
