@@ -7,20 +7,19 @@ dotenv.config();
 const app = express();
 app.use(express.json());
 
-// Используем бесплатную модель
-const MODEL_NAME = "microsoft/DialoGPT-small";
+// Используем Mistral API
+const MODEL_NAME = "open-mistral-7b"; // mistral-tiny, mistral-small, mistral-medium, mistral-large-latest
 
 const MODEL_PARAMS = {
-    max_new_tokens: 120,
+    max_tokens: 256,
     temperature: 0.8,
-    repetition_penalty: 1.2,
-    do_sample: true
+    top_p: 0.95,
+    random_seed: Math.floor(Math.random() * 10000)
 };
 
 // История диалогов
 const dialogHistory = new Map();
 
-// Автоочистка сессий
 setInterval(() => {
     const now = Date.now();
     for (const [id, session] of dialogHistory.entries()) {
@@ -44,78 +43,83 @@ app.post("/alice", async (req, res) => {
         const text = request.original_utterance || "";
         const isNew = session.new;
 
-        // Создание сессии
+        // Инициализация сессии
         if (isNew || !dialogHistory.has(sessionId)) {
-            dialogHistory.set(sessionId, { history: [], lastActivity: Date.now() });
+            dialogHistory.set(sessionId, {
+                history: [],
+                lastActivity: Date.now()
+            });
         }
 
         const data = dialogHistory.get(sessionId);
         data.lastActivity = Date.now();
 
+        // Приветствие при новой сессии и пустом вводе
         if (!text.trim()) {
-            const welcome = "Привет! Я подключён к искусственному интеллекту. Что хотите узнать?";
-            data.history.push("Ассистент: " + welcome);
-
+            const welcome = "Привет! Я подключён к Mistral AI. Чем могу помочь?";
+            data.history.push({ role: "assistant", content: welcome });
             return res.json({
                 response: { text: welcome, end_session: false },
                 version: "1.0"
             });
         }
 
-        data.history.push("Пользователь: " + text);
-        const context = data.history.slice(-4).join("\n");
+        // Добавляем реплику пользователя
+        data.history.push({ role: "user", content: text });
 
-        // ---- HF API ----
-        const hf = await fetch(
-            `https://router.huggingface.co/text-generation/${MODEL_NAME}`,
-            {
-                method: "POST",
-                headers: {
-                    "Authorization": `Bearer ${process.env.HF_API_KEY}`,
-                    "Content-Type": "application/json"
-                },
-                body: JSON.stringify({
-                    inputs: context,
-                    parameters: MODEL_PARAMS
-                })
-            }
-        );
+        // Формируем messages: системное сообщение + история (до 6 последних)
+        const messages = [
+            { role: "system", content: "Ты — дружелюбный и краткий ассистент для Алисы (Яндекс.Диалоги). Отвечай на русском языке. Избегай markdown и длинных списков." },
+            ...data.history.slice(-6) // ограничим историю, чтобы не превысить лимит токенов
+        ];
 
-        if (!hf.ok) {
-            console.error("HF API error:", await hf.text());
-            throw new Error("HF API Error " + hf.status);
+        // Запрос к Mistral API
+        const mistralRes = await fetch("https://api.mistral.ai/v1/chat/completions", {
+            method: "POST",
+            headers: {
+                "Authorization": `Bearer ${process.env.MISTRAL_API_KEY}`,
+                "Content-Type": "application/json",
+                "Accept": "application/json"
+            },
+            body: JSON.stringify({
+                model: MODEL_NAME,
+                messages,
+                ...MODEL_PARAMS
+            })
+        });
+
+        if (!mistralRes.ok) {
+            const errText = await mistralRes.text();
+            console.error("Mistral API error:", mistralRes.status, errText);
+            throw new Error(`Mistral API ${mistralRes.status}: ${errText}`);
         }
 
-        const json = await hf.json();
+        const json = await mistralRes.json();
+        const reply = json?.choices?.[0]?.message?.content?.trim() || "";
 
-        let answer = json?.[0]?.generated_text || "";
+        if (!reply) {
+            throw new Error("Пустой ответ от Mistral API");
+        }
 
-        // Ищем последнюю строку ассистента
-        const lines = answer.split("\n");
-        let reply = lines.reverse().find(l => l.startsWith("Ассистент:"));
+        // Обрезка под лимит Алисы (1024 символа)
+        let finalReply = reply.length > 1024 ? reply.slice(0, 1020) + "…" : reply;
 
-        if (reply) reply = reply.replace("Ассистент:", "").trim();
-        else reply = answer.trim();
-
-        // Убираем мусор
-        reply = reply.replace(/<\|endoftext\|>/g, "").trim();
-        if (!reply) reply = "Я пока не знаю, что ответить. Попробуете иначе сформулировать?";
-
-        // Обрезка для Алисы
-        if (reply.length > 1024) reply = reply.slice(0, 1020) + "...";
-
-        data.history.push("Ассистент: " + reply);
-        if (data.history.length > 10) data.history = data.history.slice(-10);
+        // Сохраняем ответ в историю
+        data.history.push({ role: "assistant", content: finalReply });
+        if (data.history.length > 10) {
+            data.history = data.history.slice(-10);
+        }
 
         return res.json({
-            response: { text: reply, end_session: false },
+            response: { text: finalReply, end_session: false },
             version: "1.0"
         });
+
     } catch (err) {
-        console.error("Ошибка:", err);
+        console.error("❌ Ошибка в /alice:", err.message);
         return res.json({
             response: {
-                text: "Похоже, сервер ИИ временно недоступен.",
+                text: "Похоже, временно не могу ответить. Попробуйте повторить через минуту.",
                 end_session: false
             },
             version: "1.0"
@@ -123,26 +127,27 @@ app.post("/alice", async (req, res) => {
     }
 });
 
-// health-check
+// Health-check
 app.get("/health", (req, res) => {
     res.json({
         status: "ok",
         time: new Date().toISOString(),
         memory: process.memoryUsage(),
-        sessions: dialogHistory.size
+        sessions: dialogHistory.size,
+        model: MODEL_NAME
     });
 });
 
 // Проверка переменных окружения
-if (!process.env.HF_API_KEY) {
-    console.error("❌ Нет переменной HF_API_KEY в .env!");
+if (!process.env.MISTRAL_API_KEY) {
+    console.error("❌ Отсутствует MISTRAL_API_KEY в .env!");
     process.exit(1);
 }
 
 const PORT = process.env.PORT || 3000;
 
 app.listen(PORT, () => {
-    console.log(`🚀 Сервер работает на http://localhost:${PORT}`);
+    console.log(`🚀 Сервер запущен на http://localhost:${PORT}`);
     console.log(`🧠 Модель: ${MODEL_NAME}`);
-    console.log(`🔑 Токен: ${process.env.HF_API_KEY.slice(0, 5)}...`);
+    console.log(`🔑 Mistral API Key: ${process.env.MISTRAL_API_KEY.slice(0, 5)}...`);
 });
